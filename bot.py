@@ -1,10 +1,10 @@
 import os
 import sqlite3
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 logging.basicConfig(
@@ -13,18 +13,44 @@ logging.basicConfig(
 )
 
 TOKEN = os.getenv("BOT_TOKEN")
-DB_NAME = "/data/reminders.db"
+DB_NAME = "/data/reminders.db"   # Railway Volume mount path: /data
 TZ = ZoneInfo("Europe/Istanbul")
 
 if not TOKEN:
     raise ValueError("BOT_TOKEN environment variable bulunamadı!")
 
+WEEKDAY_MAP = {
+    "pazartesi": 0,
+    "salı": 1,
+    "sali": 1,
+    "çarşamba": 2,
+    "carsamba": 2,
+    "perşembe": 3,
+    "persembe": 3,
+    "cuma": 4,
+    "cumartesi": 5,
+    "pazar": 6,
+}
+
+WEEKDAY_NAMES = {
+    0: "Pazartesi",
+    1: "Salı",
+    2: "Çarşamba",
+    3: "Perşembe",
+    4: "Cuma",
+    5: "Cumartesi",
+    6: "Pazar",
+}
+
 # ---------------------------
 # DATABASE
 # ---------------------------
 
+def get_conn():
+    return sqlite3.connect(DB_NAME)
+
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -43,7 +69,7 @@ def init_db():
     conn.close()
 
 def add_daily_reminder(chat_id, remind_time, message):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO reminders (chat_id, type, remind_time, message)
@@ -55,7 +81,7 @@ def add_daily_reminder(chat_id, remind_time, message):
     return reminder_id
 
 def add_once_reminder(chat_id, remind_date, remind_time, message):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO reminders (chat_id, type, remind_date, remind_time, message)
@@ -67,7 +93,7 @@ def add_once_reminder(chat_id, remind_date, remind_time, message):
     return reminder_id
 
 def add_monthly_reminder(chat_id, day, remind_time, message):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO reminders (chat_id, type, remind_date, remind_time, message)
@@ -78,8 +104,20 @@ def add_monthly_reminder(chat_id, day, remind_time, message):
     conn.close()
     return reminder_id
 
+def add_weekly_reminder(chat_id, weekday, remind_time, message):
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO reminders (chat_id, type, remind_date, remind_time, message)
+        VALUES (?, 'weekly', ?, ?, ?)
+    """, (chat_id, str(weekday), remind_time, message))
+    reminder_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return reminder_id
+
 def get_all_active_reminders():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("""
         SELECT id, chat_id, type, remind_time, remind_date, message
@@ -91,7 +129,7 @@ def get_all_active_reminders():
     return rows
 
 def get_user_reminders(chat_id):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("""
         SELECT id, type, remind_time, remind_date, message
@@ -104,7 +142,7 @@ def get_user_reminders(chat_id):
     return rows
 
 def delete_reminder(reminder_id, chat_id):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("""
         DELETE FROM reminders
@@ -116,7 +154,7 @@ def delete_reminder(reminder_id, chat_id):
     return affected > 0
 
 def deactivate_once_reminder(reminder_id):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute("""
         UPDATE reminders
@@ -125,6 +163,15 @@ def deactivate_once_reminder(reminder_id):
     """, (reminder_id,))
     conn.commit()
     conn.close()
+
+# ---------------------------
+# UI
+# ---------------------------
+
+def support_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📞 Destek", url="https://t.me/KGBotomasyon")]
+    ])
 
 # ---------------------------
 # JOB
@@ -139,7 +186,7 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"⏰ Hatırlatma:\n{message}"
+        text=f"⏰ Hatırlatma\n\n{message}"
     )
 
     if reminder_type == "once":
@@ -176,13 +223,28 @@ def schedule_monthly_job(app, reminder_id, chat_id, day, remind_time, message):
         name=f"monthly_{reminder_id}"
     )
 
+def schedule_weekly_job(app, reminder_id, chat_id, weekday, remind_time, message):
+    t = datetime.strptime(remind_time, "%H:%M").time().replace(tzinfo=TZ)
+
+    app.job_queue.run_daily(
+        send_reminder,
+        time=t,
+        days=(int(weekday),),
+        data={
+            "id": reminder_id,
+            "chat_id": chat_id,
+            "message": message,
+            "type": "weekly"
+        },
+        name=f"weekly_{reminder_id}"
+    )
+
 def schedule_once_job(app, reminder_id, chat_id, remind_date, remind_time, message):
     target_dt = datetime.strptime(
         f"{remind_date} {remind_time}", "%Y-%m-%d %H:%M"
     ).replace(tzinfo=TZ)
 
     now = datetime.now(TZ)
-
     if target_dt <= now:
         return
 
@@ -205,17 +267,15 @@ def load_jobs(app):
 
     for reminder in reminders:
         reminder_id, chat_id, r_type, remind_time, remind_date, message = reminder
-
         try:
             if r_type == "daily":
                 schedule_daily_job(app, reminder_id, chat_id, remind_time, message)
-
             elif r_type == "monthly":
                 schedule_monthly_job(app, reminder_id, chat_id, remind_date, remind_time, message)
-
+            elif r_type == "weekly":
+                schedule_weekly_job(app, reminder_id, chat_id, remind_date, remind_time, message)
             elif r_type == "once":
                 schedule_once_job(app, reminder_id, chat_id, remind_date, remind_time, message)
-
         except Exception as e:
             logging.error(f"Job yüklenemedi: {reminder} | Hata: {e}")
 
@@ -228,21 +288,52 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Merhaba, hatırlatma botuna hoş geldin.\n\n"
         "Komutlar:\n"
         "/gunluk HH:MM mesaj\n"
-        "Örnek: /gunluk 14:00 İlacını iç\n\n"
         "/tarih YYYY-MM-DD HH:MM mesaj\n"
-        "Örnek: /tarih 2026-04-04 09:00 Doğum günün\n\n"
         "/aylik GUN HH:MM mesaj\n"
-        "Örnek: /aylik 4 09:00 Kira günü\n\n"
+        "/haftalik gun HH:MM mesaj\n"
+        "/test dakika mesaj\n"
         "/liste\n"
         "/sil ID\n"
+        "/yardim"
     )
-    await update.message.reply_text(text)
+    await update.message.reply_text(
+        text,
+        reply_markup=support_keyboard()
+    )
+
+async def yardim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "📘 Kullanım Kılavuzu\n\n"
+        "1) Günlük hatırlatma:\n"
+        "/gunluk 14:00 İlacını iç\n\n"
+        "2) Tarihli tek seferlik hatırlatma:\n"
+        "/tarih 2026-04-04 09:00 Doğum günün\n\n"
+        "3) Aylık hatırlatma:\n"
+        "/aylik 4 09:00 Kira günü\n\n"
+        "4) Haftalık hatırlatma:\n"
+        "/haftalik pazartesi 09:00 Spor yap\n"
+        "/haftalik cuma 20:00 Çöpü çıkar\n\n"
+        "5) Test hatırlatma:\n"
+        "/test 1 Deneme mesajı\n\n"
+        "6) Listeleme:\n"
+        "/liste\n\n"
+        "7) Silme:\n"
+        "/sil 3\n\n"
+        "Saat dilimi: Türkiye / Europe-Istanbul"
+    )
+    await update.message.reply_text(
+        text,
+        reply_markup=support_keyboard()
+    )
 
 async def gunluk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_id = update.effective_chat.id
         remind_time = context.args[0]
-        message = " ".join(context.args[1:])
+        message = " ".join(context.args[1:]).strip()
+
+        if not message:
+            raise ValueError("Mesaj boş")
 
         datetime.strptime(remind_time, "%H:%M")
 
@@ -250,7 +341,10 @@ async def gunluk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         schedule_daily_job(context.application, reminder_id, chat_id, remind_time, message)
 
         await update.message.reply_text(
-            f"✅ Günlük hatırlatma eklendi.\nID: {reminder_id}\nSaat: {remind_time}\nMesaj: {message}"
+            f"✅ Günlük hatırlatma eklendi\n\n"
+            f"🆔 ID: {reminder_id}\n"
+            f"🕒 Saat: {remind_time}\n"
+            f"📝 Mesaj: {message}"
         )
 
     except Exception as e:
@@ -262,7 +356,10 @@ async def tarih(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         remind_date = context.args[0]
         remind_time = context.args[1]
-        message = " ".join(context.args[2:])
+        message = " ".join(context.args[2:]).strip()
+
+        if not message:
+            raise ValueError("Mesaj boş")
 
         target_dt = datetime.strptime(
             f"{remind_date} {remind_time}", "%Y-%m-%d %H:%M"
@@ -276,7 +373,11 @@ async def tarih(update: Update, context: ContextTypes.DEFAULT_TYPE):
         schedule_once_job(context.application, reminder_id, chat_id, remind_date, remind_time, message)
 
         await update.message.reply_text(
-            f"✅ Tek seferlik hatırlatma eklendi.\nID: {reminder_id}\nTarih: {remind_date}\nSaat: {remind_time}\nMesaj: {message}"
+            f"✅ Tek seferlik hatırlatma eklendi\n\n"
+            f"🆔 ID: {reminder_id}\n"
+            f"📅 Tarih: {remind_date}\n"
+            f"🕒 Saat: {remind_time}\n"
+            f"📝 Mesaj: {message}"
         )
 
     except Exception as e:
@@ -288,7 +389,10 @@ async def aylik(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         day = int(context.args[0])
         remind_time = context.args[1]
-        message = " ".join(context.args[2:])
+        message = " ".join(context.args[2:]).strip()
+
+        if not message:
+            raise ValueError("Mesaj boş")
 
         if day < 1 or day > 31:
             await update.message.reply_text("Gün 1 ile 31 arasında olmalı.")
@@ -300,31 +404,131 @@ async def aylik(update: Update, context: ContextTypes.DEFAULT_TYPE):
         schedule_monthly_job(context.application, reminder_id, chat_id, day, remind_time, message)
 
         await update.message.reply_text(
-            f"✅ Aylık hatırlatma eklendi.\nID: {reminder_id}\nHer ayın {day}. günü {remind_time}\nMesaj: {message}"
+            f"✅ Aylık hatırlatma eklendi\n\n"
+            f"🆔 ID: {reminder_id}\n"
+            f"📅 Her ayın {day}. günü\n"
+            f"🕒 Saat: {remind_time}\n"
+            f"📝 Mesaj: {message}"
         )
 
     except Exception as e:
         logging.error(f"/aylik hata: {e}")
-        await update.message.reply_text("Kullanım:\n/aylik 4 09:00 Doğum günün")
+        await update.message.reply_text("Kullanım:\n/aylik 4 09:00 Kira günü")
+
+async def haftalik(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = update.effective_chat.id
+        day_text = context.args[0].lower()
+        remind_time = context.args[1]
+        message = " ".join(context.args[2:]).strip()
+
+        if not message:
+            raise ValueError("Mesaj boş")
+
+        if day_text not in WEEKDAY_MAP:
+            await update.message.reply_text(
+                "Geçerli gün gir.\nÖrnek:\n/haftalik pazartesi 09:00 Spor yap"
+            )
+            return
+
+        weekday = WEEKDAY_MAP[day_text]
+        datetime.strptime(remind_time, "%H:%M")
+
+        reminder_id = add_weekly_reminder(chat_id, weekday, remind_time, message)
+        schedule_weekly_job(context.application, reminder_id, chat_id, weekday, remind_time, message)
+
+        await update.message.reply_text(
+            f"✅ Haftalık hatırlatma eklendi\n\n"
+            f"🆔 ID: {reminder_id}\n"
+            f"📅 Gün: {WEEKDAY_NAMES[weekday]}\n"
+            f"🕒 Saat: {remind_time}\n"
+            f"📝 Mesaj: {message}"
+        )
+
+    except Exception as e:
+        logging.error(f"/haftalik hata: {e}")
+        await update.message.reply_text("Kullanım:\n/haftalik pazartesi 09:00 Spor yap")
+
+async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        chat_id = update.effective_chat.id
+        minutes = int(context.args[0])
+        message = " ".join(context.args[1:]).strip()
+
+        if minutes < 1:
+            await update.message.reply_text("Dakika en az 1 olmalı.")
+            return
+
+        if not message:
+            raise ValueError("Mesaj boş")
+
+        context.job_queue.run_once(
+            send_reminder,
+            when=minutes * 60,
+            data={
+                "id": 0,
+                "chat_id": chat_id,
+                "message": f"[TEST] {message}",
+                "type": "test"
+            },
+            name=f"test_{chat_id}_{datetime.now(TZ).timestamp()}"
+        )
+
+        await update.message.reply_text(
+            f"🧪 Test hatırlatma ayarlandı\n\n"
+            f"⏳ {minutes} dakika sonra mesaj gelecek.\n"
+            f"📝 Mesaj: {message}"
+        )
+
+    except Exception as e:
+        logging.error(f"/test hata: {e}")
+        await update.message.reply_text("Kullanım:\n/test 1 Deneme mesajı")
 
 async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     reminders = get_user_reminders(chat_id)
 
     if not reminders:
-        await update.message.reply_text("Aktif hatırlatma bulunamadı.")
+        await update.message.reply_text("📭 Aktif hatırlatma bulunamadı.")
         return
 
-    lines = ["📋 Hatırlatmaların:\n"]
+    lines = ["📋 Hatırlatmaların\n"]
+
     for r in reminders:
         reminder_id, r_type, remind_time, remind_date, message = r
 
         if r_type == "daily":
-            lines.append(f"ID {reminder_id} | Günlük | {remind_time} | {message}")
+            lines.append(
+                f"🆔 {reminder_id}\n"
+                f"🔁 Tür: Günlük\n"
+                f"🕒 Saat: {remind_time}\n"
+                f"📝 Mesaj: {message}\n"
+            )
         elif r_type == "once":
-            lines.append(f"ID {reminder_id} | Tek sefer | {remind_date} {remind_time} | {message}")
+            lines.append(
+                f"🆔 {reminder_id}\n"
+                f"📌 Tür: Tek Seferlik\n"
+                f"📅 Tarih: {remind_date}\n"
+                f"🕒 Saat: {remind_time}\n"
+                f"📝 Mesaj: {message}\n"
+            )
         elif r_type == "monthly":
-            lines.append(f"ID {reminder_id} | Aylık | Her ayın {remind_date}. günü {remind_time} | {message}")
+            lines.append(
+                f"🆔 {reminder_id}\n"
+                f"🗓️ Tür: Aylık\n"
+                f"📅 Gün: Her ayın {remind_date}. günü\n"
+                f"🕒 Saat: {remind_time}\n"
+                f"📝 Mesaj: {message}\n"
+            )
+        elif r_type == "weekly":
+            weekday_name = WEEKDAY_NAMES.get(int(remind_date), f"Gün {remind_date}")
+            lines.append(
+                f"🆔 {reminder_id}\n"
+                f"📆 Tür: Haftalık\n"
+                f"📅 Gün: {weekday_name}\n"
+                f"🕒 Saat: {remind_time}\n"
+                f"📝 Mesaj: {message}\n"
+            )
 
     await update.message.reply_text("\n".join(lines))
 
@@ -336,11 +540,16 @@ async def sil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         success = delete_reminder(reminder_id, chat_id)
 
         for job in context.application.job_queue.jobs():
-            if job.name in [f"daily_{reminder_id}", f"monthly_{reminder_id}", f"once_{reminder_id}"]:
+            if job.name in [
+                f"daily_{reminder_id}",
+                f"monthly_{reminder_id}",
+                f"weekly_{reminder_id}",
+                f"once_{reminder_id}"
+            ]:
                 job.schedule_removal()
 
         if success:
-            await update.message.reply_text(f"🗑️ Hatırlatma silindi. ID: {reminder_id}")
+            await update.message.reply_text(f"🗑️ Hatırlatma silindi.\nID: {reminder_id}")
         else:
             await update.message.reply_text("Böyle bir hatırlatma bulunamadı.")
 
@@ -348,15 +557,22 @@ async def sil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"/sil hata: {e}")
         await update.message.reply_text("Kullanım:\n/sil ID")
 
+# ---------------------------
+# MAIN
+# ---------------------------
+
 def main():
     init_db()
 
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("yardim", yardim))
     app.add_handler(CommandHandler("gunluk", gunluk))
     app.add_handler(CommandHandler("tarih", tarih))
     app.add_handler(CommandHandler("aylik", aylik))
+    app.add_handler(CommandHandler("haftalik", haftalik))
+    app.add_handler(CommandHandler("test", test))
     app.add_handler(CommandHandler("liste", liste))
     app.add_handler(CommandHandler("sil", sil))
 
