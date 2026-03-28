@@ -1,7 +1,8 @@
 import os
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -12,25 +13,18 @@ logging.basicConfig(
 )
 
 TOKEN = os.getenv("BOT_TOKEN")
-DB_PATH = os.getenv("DB_PATH", "/data/reminders.db")
+DB_NAME = "/data/reminders.db"
+TZ = ZoneInfo("Europe/Istanbul")
 
 if not TOKEN:
     raise ValueError("BOT_TOKEN environment variable bulunamadı!")
-
-# DB klasörü yoksa oluştur
-db_dir = os.path.dirname(DB_PATH)
-if db_dir and not os.path.exists(db_dir):
-    os.makedirs(db_dir, exist_ok=True)
 
 # ---------------------------
 # DATABASE
 # ---------------------------
 
-def get_connection():
-    return sqlite3.connect(DB_PATH)
-
 def init_db():
-    conn = get_connection()
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -49,7 +43,7 @@ def init_db():
     conn.close()
 
 def add_daily_reminder(chat_id, remind_time, message):
-    conn = get_connection()
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO reminders (chat_id, type, remind_time, message)
@@ -61,7 +55,7 @@ def add_daily_reminder(chat_id, remind_time, message):
     return reminder_id
 
 def add_once_reminder(chat_id, remind_date, remind_time, message):
-    conn = get_connection()
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO reminders (chat_id, type, remind_date, remind_time, message)
@@ -73,7 +67,7 @@ def add_once_reminder(chat_id, remind_date, remind_time, message):
     return reminder_id
 
 def add_monthly_reminder(chat_id, day, remind_time, message):
-    conn = get_connection()
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO reminders (chat_id, type, remind_date, remind_time, message)
@@ -85,7 +79,7 @@ def add_monthly_reminder(chat_id, day, remind_time, message):
     return reminder_id
 
 def get_all_active_reminders():
-    conn = get_connection()
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
         SELECT id, chat_id, type, remind_time, remind_date, message
@@ -97,7 +91,7 @@ def get_all_active_reminders():
     return rows
 
 def get_user_reminders(chat_id):
-    conn = get_connection()
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
         SELECT id, type, remind_time, remind_date, message
@@ -110,7 +104,7 @@ def get_user_reminders(chat_id):
     return rows
 
 def delete_reminder(reminder_id, chat_id):
-    conn = get_connection()
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
         DELETE FROM reminders
@@ -122,7 +116,7 @@ def delete_reminder(reminder_id, chat_id):
     return affected > 0
 
 def deactivate_once_reminder(reminder_id):
-    conn = get_connection()
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
         UPDATE reminders
@@ -133,7 +127,7 @@ def deactivate_once_reminder(reminder_id):
     conn.close()
 
 # ---------------------------
-# JOB FUNCTIONS
+# JOB
 # ---------------------------
 
 async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
@@ -152,9 +146,11 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
         deactivate_once_reminder(reminder_id)
 
 def schedule_daily_job(app, reminder_id, chat_id, remind_time, message):
+    t = datetime.strptime(remind_time, "%H:%M").time().replace(tzinfo=TZ)
+
     app.job_queue.run_daily(
         send_reminder,
-        time=datetime.strptime(remind_time, "%H:%M").time(),
+        time=t,
         data={
             "id": reminder_id,
             "chat_id": chat_id,
@@ -165,9 +161,11 @@ def schedule_daily_job(app, reminder_id, chat_id, remind_time, message):
     )
 
 def schedule_monthly_job(app, reminder_id, chat_id, day, remind_time, message):
+    t = datetime.strptime(remind_time, "%H:%M").time().replace(tzinfo=TZ)
+
     app.job_queue.run_monthly(
         send_reminder,
-        when=datetime.strptime(remind_time, "%H:%M").time(),
+        when=t,
         day=int(day),
         data={
             "id": reminder_id,
@@ -179,15 +177,20 @@ def schedule_monthly_job(app, reminder_id, chat_id, day, remind_time, message):
     )
 
 def schedule_once_job(app, reminder_id, chat_id, remind_date, remind_time, message):
-    target_dt = datetime.strptime(f"{remind_date} {remind_time}", "%Y-%m-%d %H:%M")
-    now = datetime.now()
+    target_dt = datetime.strptime(
+        f"{remind_date} {remind_time}", "%Y-%m-%d %H:%M"
+    ).replace(tzinfo=TZ)
+
+    now = datetime.now(TZ)
 
     if target_dt <= now:
         return
 
+    delay = (target_dt - now).total_seconds()
+
     app.job_queue.run_once(
         send_reminder,
-        when=(target_dt - now),
+        when=delay,
         data={
             "id": reminder_id,
             "chat_id": chat_id,
@@ -206,10 +209,13 @@ def load_jobs(app):
         try:
             if r_type == "daily":
                 schedule_daily_job(app, reminder_id, chat_id, remind_time, message)
+
             elif r_type == "monthly":
                 schedule_monthly_job(app, reminder_id, chat_id, remind_date, remind_time, message)
+
             elif r_type == "once":
                 schedule_once_job(app, reminder_id, chat_id, remind_date, remind_time, message)
+
         except Exception as e:
             logging.error(f"Job yüklenemedi: {reminder} | Hata: {e}")
 
@@ -218,7 +224,7 @@ def load_jobs(app):
 # ---------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+    text = (
         "Merhaba, hatırlatma botuna hoş geldin.\n\n"
         "Komutlar:\n"
         "/gunluk HH:MM mesaj\n"
@@ -228,17 +234,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/aylik GUN HH:MM mesaj\n"
         "Örnek: /aylik 4 09:00 Kira günü\n\n"
         "/liste\n"
-        "/sil ID"
+        "/sil ID\n"
     )
+    await update.message.reply_text(text)
 
 async def gunluk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         chat_id = update.effective_chat.id
         remind_time = context.args[0]
         message = " ".join(context.args[1:])
-
-        if not message:
-            raise ValueError("Mesaj boş olamaz")
 
         datetime.strptime(remind_time, "%H:%M")
 
@@ -248,7 +252,9 @@ async def gunluk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Günlük hatırlatma eklendi.\nID: {reminder_id}\nSaat: {remind_time}\nMesaj: {message}"
         )
-    except Exception:
+
+    except Exception as e:
+        logging.error(f"/gunluk hata: {e}")
         await update.message.reply_text("Kullanım:\n/gunluk 14:00 İlacını iç")
 
 async def tarih(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -258,12 +264,11 @@ async def tarih(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remind_time = context.args[1]
         message = " ".join(context.args[2:])
 
-        if not message:
-            raise ValueError("Mesaj boş olamaz")
+        target_dt = datetime.strptime(
+            f"{remind_date} {remind_time}", "%Y-%m-%d %H:%M"
+        ).replace(tzinfo=TZ)
 
-        target_dt = datetime.strptime(f"{remind_date} {remind_time}", "%Y-%m-%d %H:%M")
-
-        if target_dt <= datetime.now():
+        if target_dt <= datetime.now(TZ):
             await update.message.reply_text("Geçmiş bir tarih veremezsin.")
             return
 
@@ -273,7 +278,9 @@ async def tarih(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Tek seferlik hatırlatma eklendi.\nID: {reminder_id}\nTarih: {remind_date}\nSaat: {remind_time}\nMesaj: {message}"
         )
-    except Exception:
+
+    except Exception as e:
+        logging.error(f"/tarih hata: {e}")
         await update.message.reply_text("Kullanım:\n/tarih 2026-04-04 09:00 Doğum günün")
 
 async def aylik(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -282,9 +289,6 @@ async def aylik(update: Update, context: ContextTypes.DEFAULT_TYPE):
         day = int(context.args[0])
         remind_time = context.args[1]
         message = " ".join(context.args[2:])
-
-        if not message:
-            raise ValueError("Mesaj boş olamaz")
 
         if day < 1 or day > 31:
             await update.message.reply_text("Gün 1 ile 31 arasında olmalı.")
@@ -298,7 +302,9 @@ async def aylik(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Aylık hatırlatma eklendi.\nID: {reminder_id}\nHer ayın {day}. günü {remind_time}\nMesaj: {message}"
         )
-    except Exception:
+
+    except Exception as e:
+        logging.error(f"/aylik hata: {e}")
         await update.message.reply_text("Kullanım:\n/aylik 4 09:00 Doğum günün")
 
 async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -310,8 +316,9 @@ async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lines = ["📋 Hatırlatmaların:\n"]
+    for r in reminders:
+        reminder_id, r_type, remind_time, remind_date, message = r
 
-    for reminder_id, r_type, remind_time, remind_date, message in reminders:
         if r_type == "daily":
             lines.append(f"ID {reminder_id} | Günlük | {remind_time} | {message}")
         elif r_type == "once":
@@ -337,12 +344,9 @@ async def sil(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("Böyle bir hatırlatma bulunamadı.")
 
-    except Exception:
+    except Exception as e:
+        logging.error(f"/sil hata: {e}")
         await update.message.reply_text("Kullanım:\n/sil ID")
-
-# ---------------------------
-# MAIN
-# ---------------------------
 
 def main():
     init_db()
@@ -358,7 +362,7 @@ def main():
 
     load_jobs(app)
 
-    logging.info(f"Bot başlatıldı. DB: {DB_PATH}")
+    logging.info("Bot başlatıldı...")
     app.run_polling()
 
 if __name__ == "__main__":
