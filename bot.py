@@ -103,7 +103,8 @@ def init_db():
             message TEXT NOT NULL,
             active INTEGER DEFAULT 1,
             repeat_count INTEGER DEFAULT 0,
-            pending INTEGER DEFAULT 0
+            pending INTEGER DEFAULT 0,
+            created_at TEXT
         )
     """)
 
@@ -157,17 +158,20 @@ def save_user_or_chat(update: Update):
 def add_reminder(chat_id, user_id, username, full_name, chat_type, r_type, category, remind_time, remind_date, message):
     conn = get_conn()
     c = conn.cursor()
+    created_at = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+
     c.execute("""
         INSERT INTO reminders (
             chat_id, user_id, username, full_name, chat_type,
             type, category, remind_time, remind_date, message,
-            active, repeat_count, pending
+            active, repeat_count, pending, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, ?)
     """, (
         chat_id, user_id, username, full_name, chat_type,
-        r_type, category, remind_time, remind_date, message
+        r_type, category, remind_time, remind_date, message, created_at
     ))
+
     reminder_id = c.lastrowid
     conn.commit()
     conn.close()
@@ -203,7 +207,7 @@ def get_reminder(reminder_id):
     c = conn.cursor()
     c.execute("""
         SELECT id, chat_id, user_id, username, full_name, chat_type, type, category,
-               remind_time, remind_date, message, active, repeat_count, pending
+               remind_time, remind_date, message, active, repeat_count, pending, created_at
         FROM reminders
         WHERE id = ?
     """, (reminder_id,))
@@ -255,70 +259,6 @@ def increment_repeat_count(reminder_id):
     conn.commit()
     conn.close()
 
-def get_admin_users():
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("""
-        SELECT user_id, chat_id, username, full_name, chat_type, first_seen, last_seen
-        FROM users
-        ORDER BY last_seen DESC
-        LIMIT 200
-    """)
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def get_admin_reminders():
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("""
-        SELECT id, user_id, chat_id, username, full_name, chat_type, type, category,
-               remind_time, remind_date, message, active
-        FROM reminders
-        ORDER BY id DESC
-        LIMIT 200
-    """)
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def get_user_reminders_by_user_id(user_id):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("""
-        SELECT id, user_id, chat_id, username, full_name, chat_type, type, category,
-               remind_time, remind_date, message, active
-        FROM reminders
-        WHERE user_id = ?
-        ORDER BY id DESC
-        LIMIT 100
-    """, (user_id,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def get_stats():
-    conn = get_conn()
-    c = conn.cursor()
-
-    c.execute("SELECT COUNT(*) FROM users")
-    total_users = c.fetchone()[0]
-
-    c.execute("SELECT COUNT(DISTINCT user_id) FROM users")
-    unique_people = c.fetchone()[0]
-
-    c.execute("SELECT COUNT(DISTINCT chat_id) FROM users WHERE chat_type IN ('group', 'supergroup')")
-    total_groups = c.fetchone()[0]
-
-    c.execute("SELECT COUNT(*) FROM reminders")
-    total_reminders = c.fetchone()[0]
-
-    c.execute("SELECT COUNT(*) FROM reminders WHERE active = 1")
-    active_reminders = c.fetchone()[0]
-
-    conn.close()
-    return total_users, unique_people, total_groups, total_reminders, active_reminders
-
 def update_reminder_message(reminder_id, chat_id, new_message):
     conn = get_conn()
     c = conn.cursor()
@@ -357,6 +297,85 @@ def update_reminder_category(reminder_id, chat_id, category):
     conn.commit()
     conn.close()
     return ok > 0
+
+def get_admin_users():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT user_id, chat_id, username, full_name, chat_type, first_seen, last_seen
+        FROM users
+        ORDER BY last_seen DESC
+        LIMIT 200
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def get_admin_reminders():
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, user_id, chat_id, username, full_name, chat_type, type, category,
+               remind_time, remind_date, message, active, created_at
+        FROM reminders
+        ORDER BY id DESC
+        LIMIT 200
+    """)
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def get_user_reminders_by_user_id(user_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, user_id, chat_id, username, full_name, chat_type, type, category,
+               remind_time, remind_date, message, active, created_at
+        FROM reminders
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 100
+    """, (user_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def get_reminders_by_chat_id(chat_id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, user_id, chat_id, username, full_name, chat_type, type, category,
+               remind_time, remind_date, message, active, created_at
+        FROM reminders
+        WHERE chat_id = ?
+        ORDER BY id DESC
+        LIMIT 100
+    """, (chat_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def get_stats():
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute("SELECT COUNT(*) FROM users")
+    total_user_chat_records = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(DISTINCT user_id) FROM users")
+    unique_users = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(DISTINCT chat_id) FROM users WHERE chat_type IN ('group', 'supergroup')")
+    total_groups = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM reminders")
+    total_reminders = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM reminders WHERE active = 1")
+    active_reminders = c.fetchone()[0]
+
+    conn.close()
+    return total_user_chat_records, unique_users, total_groups, total_reminders, active_reminders
 
 
 # ---------------------------
@@ -397,7 +416,7 @@ def list_delete_keyboard(reminder_id):
         [InlineKeyboardButton("🗑 Sil", callback_data=f"userdelete:{reminder_id}")]
     ])
 
-def schedule_all_types(app, reminder_id, chat_id, r_type, remind_date, remind_time):
+def schedule_all_types(app, reminder_id, r_type, remind_date, remind_time):
     if r_type == "daily":
         schedule_daily_job(app, reminder_id, remind_time)
     elif r_type == "once":
@@ -419,7 +438,7 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
     if not row:
         return
 
-    _, chat_id, user_id, username, full_name, chat_type, r_type, category, remind_time, remind_date, message, active, repeat_count, pending = row
+    _, chat_id, user_id, username, full_name, chat_type, r_type, category, remind_time, remind_date, message, active, repeat_count, pending, created_at = row
 
     if active != 1:
         return
@@ -452,7 +471,7 @@ async def check_unanswered_reminder(context: ContextTypes.DEFAULT_TYPE):
     if not row:
         return
 
-    _, chat_id, user_id, username, full_name, chat_type, r_type, category, remind_time, remind_date, message, active, repeat_count, pending = row
+    _, chat_id, user_id, username, full_name, chat_type, r_type, category, remind_time, remind_date, message, active, repeat_count, pending, created_at = row
 
     if active != 1 or pending != 1:
         return
@@ -482,23 +501,50 @@ async def check_unanswered_reminder(context: ContextTypes.DEFAULT_TYPE):
 
 def schedule_daily_job(app, reminder_id, remind_time):
     t = datetime.strptime(remind_time, "%H:%M").time().replace(tzinfo=TZ)
-    app.job_queue.run_daily(send_reminder, time=t, data={"id": reminder_id}, name=f"daily_{reminder_id}")
+    app.job_queue.run_daily(
+        send_reminder,
+        time=t,
+        data={"id": reminder_id},
+        name=f"daily_{reminder_id}"
+    )
 
 def schedule_monthly_job(app, reminder_id, day, remind_time):
     t = datetime.strptime(remind_time, "%H:%M").time().replace(tzinfo=TZ)
-    app.job_queue.run_monthly(send_reminder, when=t, day=int(day), data={"id": reminder_id}, name=f"monthly_{reminder_id}")
+    app.job_queue.run_monthly(
+        send_reminder,
+        when=t,
+        day=int(day),
+        data={"id": reminder_id},
+        name=f"monthly_{reminder_id}"
+    )
 
 def schedule_weekly_job(app, reminder_id, weekday, remind_time):
     t = datetime.strptime(remind_time, "%H:%M").time().replace(tzinfo=TZ)
-    app.job_queue.run_daily(send_reminder, time=t, days=(int(weekday),), data={"id": reminder_id}, name=f"weekly_{reminder_id}")
+    app.job_queue.run_daily(
+        send_reminder,
+        time=t,
+        days=(int(weekday),),
+        data={"id": reminder_id},
+        name=f"weekly_{reminder_id}"
+    )
 
 def schedule_once_job(app, reminder_id, remind_date, remind_time):
-    target_dt = datetime.strptime(f"{remind_date} {remind_time}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+    target_dt = datetime.strptime(
+        f"{remind_date} {remind_time}", "%Y-%m-%d %H:%M"
+    ).replace(tzinfo=TZ)
+
     now = datetime.now(TZ)
     if target_dt <= now:
         return
+
     delay = (target_dt - now).total_seconds()
-    app.job_queue.run_once(send_reminder, when=delay, data={"id": reminder_id}, name=f"once_{reminder_id}")
+
+    app.job_queue.run_once(
+        send_reminder,
+        when=delay,
+        data={"id": reminder_id},
+        name=f"once_{reminder_id}"
+    )
 
 def remove_jobs_for_reminder(app, reminder_id):
     for job in app.job_queue.jobs():
@@ -514,20 +560,19 @@ def load_jobs(app):
     reminders = get_all_active_reminders()
     for reminder_id, chat_id, r_type, category, remind_time, remind_date, message in reminders:
         try:
-            schedule_all_types(app, reminder_id, chat_id, r_type, remind_date, remind_time)
+            schedule_all_types(app, reminder_id, r_type, remind_date, remind_time)
         except Exception as e:
             logging.error(f"Job yüklenemedi {reminder_id}: {e}")
 
 
 # ---------------------------
-# START / MENU
+# START / HELP / MENU
 # ---------------------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user_or_chat(update)
-    text = "Hoş geldin. Menüden işlem seçebilirsin."
     await update.message.reply_text(
-        text,
+        "Hoş geldin. Menüden işlem seçebilirsin.",
         reply_markup=main_menu_keyboard(admin=is_admin(update.effective_user.id))
     )
 
@@ -537,13 +582,17 @@ async def yardim(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📘 Yardım\n\n"
         "Bot özelde ve grupta çalışır.\n"
         "Grupta eklenen hatırlatmalar gruba gider.\n"
-        "Özelde eklenen hatırlatmalar sana özel gelir.\n\n"
-        "Komutlar:\n"
-        "/start\n"
-        "/liste\n"
+        "Özelde eklenen hatırlatmalar kullanıcıya gider.\n\n"
+        "Düzenleme komutları:\n"
         "/duzenle_mesaj ID yeni mesaj\n"
         "/duzenle_saat ID HH:MM\n"
-        "/duzenle_kategori ID kategori\n"
+        "/duzenle_kategori ID kategori\n\n"
+        "Admin komutları:\n"
+        "/admin_users\n"
+        "/admin_reminders\n"
+        "/admin_stats\n"
+        "/admin_user USER_ID\n"
+        "/admin_chat CHAT_ID"
     )
     await update.message.reply_text(text, reply_markup=support_keyboard())
 
@@ -560,7 +609,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     if text == "📞 Destek":
-        await update.message.reply_text("Destek için butona bas:", reply_markup=support_keyboard())
+        await update.message.reply_text("Destek için aşağıdaki butona bas:", reply_markup=support_keyboard())
         return ConversationHandler.END
 
     if text == "🛠 Admin Panel":
@@ -579,21 +628,18 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     if text == "👥 Kullanıcılar":
-        if not is_admin(update.effective_user.id):
-            return ConversationHandler.END
-        await admin_users(update, context)
+        if is_admin(update.effective_user.id):
+            await admin_users(update, context)
         return ConversationHandler.END
 
     if text == "📝 Tüm Hatırlatmalar":
-        if not is_admin(update.effective_user.id):
-            return ConversationHandler.END
-        await admin_reminders(update, context)
+        if is_admin(update.effective_user.id):
+            await admin_reminders(update, context)
         return ConversationHandler.END
 
     if text == "📊 İstatistik":
-        if not is_admin(update.effective_user.id):
-            return ConversationHandler.END
-        await admin_stats(update, context)
+        if is_admin(update.effective_user.id):
+            await admin_stats(update, context)
         return ConversationHandler.END
 
     if text == "⬅️ Geri":
@@ -627,7 +673,10 @@ async def choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
 
     if text == "iptal":
-        await update.message.reply_text("İşlem iptal edildi.", reply_markup=main_menu_keyboard(admin=is_admin(update.effective_user.id)))
+        await update.message.reply_text(
+            "İşlem iptal edildi.",
+            reply_markup=main_menu_keyboard(admin=is_admin(update.effective_user.id))
+        )
         return ConversationHandler.END
 
     type_map = {
@@ -645,8 +694,8 @@ async def choose_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CHOOSING_TYPE
 
     context.user_data["rtype"] = type_map[text]
-    keyboard = [[c] for c in CATEGORIES] + [["İptal"]]
 
+    keyboard = [[c] for c in CATEGORIES] + [["İptal"]]
     await update.message.reply_text(
         "Kategori seç:",
         reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -657,7 +706,10 @@ async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
 
     if text == "iptal":
-        await update.message.reply_text("İşlem iptal edildi.", reply_markup=main_menu_keyboard(admin=is_admin(update.effective_user.id)))
+        await update.message.reply_text(
+            "İşlem iptal edildi.",
+            reply_markup=main_menu_keyboard(admin=is_admin(update.effective_user.id))
+        )
         return ConversationHandler.END
 
     if text not in CATEGORIES:
@@ -740,7 +792,9 @@ async def ask_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remind_date = context.user_data.get("remind_date")
 
     if rtype == "once":
-        target_dt = datetime.strptime(f"{remind_date} {remind_time}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+        target_dt = datetime.strptime(
+            f"{remind_date} {remind_time}", "%Y-%m-%d %H:%M"
+        ).replace(tzinfo=TZ)
         if target_dt <= datetime.now(TZ):
             await update.message.reply_text("Geçmiş tarih veremezsin.")
             return ConversationHandler.END
@@ -758,7 +812,7 @@ async def ask_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message=message
     )
 
-    schedule_all_types(context.application, reminder_id, chat.id, rtype, remind_date, remind_time)
+    schedule_all_types(context.application, reminder_id, rtype, remind_date, remind_time)
 
     await update.message.reply_text(
         f"✅ Hatırlatma eklendi\n\n"
@@ -781,7 +835,7 @@ async def cancel_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------------
-# LIST / CALLBACK
+# LIST / ACTIONS
 # ---------------------------
 
 async def liste(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -835,12 +889,11 @@ async def inline_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Hatırlatma bulunamadı.")
         return
 
-    _, chat_id, user_id, username, full_name, chat_type, r_type, category, remind_time, remind_date, message, active, repeat_count, pending = row
+    _, chat_id, user_id, username, full_name, chat_type, r_type, category, remind_time, remind_date, message, active, repeat_count, pending, created_at = row
 
     current_user_id = query.from_user.id
     current_chat_id = query.message.chat_id
 
-    # sadece admin veya o reminderın sahibi işlem yapabilsin
     if not (is_admin(current_user_id) or current_chat_id == chat_id or current_user_id == user_id):
         await query.answer("Bu işlem sana ait değil.", show_alert=True)
         return
@@ -910,9 +963,9 @@ async def duzenle_mesaj(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         row = get_reminder(reminder_id)
         remove_jobs_for_reminder(context.application, reminder_id)
-        _, r_chat_id, _, _, _, _, r_type, _, remind_time, remind_date, _, active, _, _ = row
+        _, _, _, _, _, _, r_type, _, remind_time, remind_date, _, active, _, _, _ = row
         if active == 1:
-            schedule_all_types(context.application, reminder_id, r_chat_id, r_type, remind_date, remind_time)
+            schedule_all_types(context.application, reminder_id, r_type, remind_date, remind_time)
 
         await update.message.reply_text("✅ Mesaj güncellendi.")
 
@@ -935,9 +988,9 @@ async def duzenle_saat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         row = get_reminder(reminder_id)
         remove_jobs_for_reminder(context.application, reminder_id)
-        _, r_chat_id, _, _, _, _, r_type, _, remind_time, remind_date, _, active, _, _ = row
+        _, _, _, _, _, _, r_type, _, remind_time, remind_date, _, active, _, _, _ = row
         if active == 1:
-            schedule_all_types(context.application, reminder_id, r_chat_id, r_type, remind_date, remind_time)
+            schedule_all_types(context.application, reminder_id, r_type, remind_date, remind_time)
 
         await update.message.reply_text("✅ Saat güncellendi.")
 
@@ -988,8 +1041,8 @@ async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🆔 User ID: {user_id}\n"
             f"💬 Chat ID: {chat_id}\n"
             f"📦 Tür: {chat_type}\n"
-            f"🕒 İlk: {first_seen}\n"
-            f"🕒 Son: {last_seen}"
+            f"🕒 İlk kullanım: {first_seen}\n"
+            f"🕒 Son kullanım: {last_seen}"
         )
         await update.message.reply_text(text)
 
@@ -1004,7 +1057,7 @@ async def admin_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     for r in rows[:50]:
-        reminder_id, user_id, chat_id, username, full_name, chat_type, r_type, category, remind_time, remind_date, message, active = r
+        reminder_id, user_id, chat_id, username, full_name, chat_type, r_type, category, remind_time, remind_date, message, active, created_at = r
         text = (
             f"🆔 {reminder_id}\n"
             f"👤 {full_name} (@{username})\n"
@@ -1016,6 +1069,7 @@ async def admin_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📅 Tarih/Gün: {remind_date}\n"
             f"🕒 Saat: {remind_time}\n"
             f"📝 Mesaj: {message}\n"
+            f"🕓 Oluşturulma: {created_at}\n"
             f"📊 Aktif: {active}"
         )
         await update.message.reply_text(text)
@@ -1025,12 +1079,12 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Yetkisiz.")
         return
 
-    total_users, unique_people, total_groups, total_reminders, active_reminders = get_stats()
+    total_user_chat_records, unique_users, total_groups, total_reminders, active_reminders = get_stats()
 
     text = (
         f"📊 İstatistik\n\n"
-        f"Toplam user/chat kaydı: {total_users}\n"
-        f"Tekil kullanıcı: {unique_people}\n"
+        f"Toplam user/chat kaydı: {total_user_chat_records}\n"
+        f"Tekil kullanıcı: {unique_users}\n"
         f"Toplam grup: {total_groups}\n"
         f"Toplam hatırlatma: {total_reminders}\n"
         f"Aktif hatırlatma: {active_reminders}"
@@ -1051,23 +1105,59 @@ async def admin_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         for r in rows[:50]:
-            reminder_id, user_id, chat_id, username, full_name, chat_type, r_type, category, remind_time, remind_date, message, active = r
+            reminder_id, user_id, chat_id, username, full_name, chat_type, r_type, category, remind_time, remind_date, message, active, created_at = r
             text = (
                 f"🆔 {reminder_id}\n"
                 f"👤 {full_name} (@{username})\n"
+                f"🆔 User ID: {user_id}\n"
                 f"💬 Chat ID: {chat_id}\n"
-                f"📦 Tür: {chat_type}\n"
+                f"📦 Chat Türü: {chat_type}\n"
                 f"📌 Reminder Türü: {r_type}\n"
                 f"🗂 Kategori: {category}\n"
                 f"📅 Tarih/Gün: {remind_date}\n"
                 f"🕒 Saat: {remind_time}\n"
                 f"📝 Mesaj: {message}\n"
+                f"🕓 Oluşturulma: {created_at}\n"
                 f"📊 Aktif: {active}"
             )
             await update.message.reply_text(text)
 
     except:
         await update.message.reply_text("Kullanım:\n/admin_user USER_ID")
+
+async def admin_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Yetkisiz.")
+        return
+
+    try:
+        chat_id = int(context.args[0])
+        rows = get_reminders_by_chat_id(chat_id)
+
+        if not rows:
+            await update.message.reply_text("Bu chat için kayıt bulunamadı.")
+            return
+
+        for r in rows[:50]:
+            reminder_id, user_id, chat_id, username, full_name, chat_type, r_type, category, remind_time, remind_date, message, active, created_at = r
+            text = (
+                f"🆔 {reminder_id}\n"
+                f"👤 {full_name} (@{username})\n"
+                f"🆔 User ID: {user_id}\n"
+                f"💬 Chat ID: {chat_id}\n"
+                f"📦 Chat Türü: {chat_type}\n"
+                f"📌 Tür: {r_type}\n"
+                f"🗂 Kategori: {category}\n"
+                f"📅 Tarih/Gün: {remind_date}\n"
+                f"🕒 Saat: {remind_time}\n"
+                f"📝 Mesaj: {message}\n"
+                f"🕓 Oluşturulma: {created_at}\n"
+                f"📊 Aktif: {active}"
+            )
+            await update.message.reply_text(text)
+
+    except:
+        await update.message.reply_text("Kullanım:\n/admin_chat CHAT_ID")
 
 
 # ---------------------------
@@ -1104,6 +1194,7 @@ def main():
     app.add_handler(CommandHandler("admin_reminders", admin_reminders))
     app.add_handler(CommandHandler("admin_stats", admin_stats))
     app.add_handler(CommandHandler("admin_user", admin_user))
+    app.add_handler(CommandHandler("admin_chat", admin_chat))
 
     app.add_handler(add_conv)
     app.add_handler(CallbackQueryHandler(inline_actions))
